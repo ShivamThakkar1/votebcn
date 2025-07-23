@@ -5,17 +5,10 @@ const express = require('express');
 require('dotenv').config();
 
 // MongoDB Schema
-const VoterSchema = new mongoose.Schema({
-  nickname: String,
-  votes: Number,
-  lastVote: String,
-});
-
 const VoteDataSchema = new mongoose.Schema({
   serverId: { type: String, required: true, unique: true },
   lastUpdateHash: { type: String, default: '' },
   lastMessageId: { type: String, default: null },
-  voters: [VoterSchema],
   createdAt: { type: Date, default: Date.now },
   updatedAt: { type: Date, default: Date.now }
 });
@@ -49,9 +42,15 @@ class MinecraftVoteBot {
 
   setupWebServer() {
     const app = express();
+
     app.get('/', (req, res) => {
-      res.json({ status: 'Bot is running', timestamp: new Date().toISOString() });
+      res.json({
+        status: 'Bot is running',
+        timestamp: new Date().toISOString(),
+        uptime: process.uptime()
+      });
     });
+
     app.get('/health', (req, res) => {
       res.json({
         status: 'healthy',
@@ -59,15 +58,18 @@ class MinecraftVoteBot {
         mongodb: mongoose.connection.readyState === 1 ? 'connected' : 'disconnected'
       });
     });
-    app.listen(this.port, () => console.log(`Web server running on port ${this.port}`));
+
+    app.listen(this.port, () => {
+      console.log(`Web server running on port ${this.port}`);
+    });
   }
 
   setupEventHandlers() {
-    this.client.once('ready', async () => {
+    this.client.once('ready', () => {
       console.log(`Bot is ready! Logged in as ${this.client.user.tag}`);
-      await this.updateVoteMessage(); // Check once on start
       this.startVoteMonitoring();
     });
+
     this.client.on('error', console.error);
   }
 
@@ -75,7 +77,7 @@ class MinecraftVoteBot {
     try {
       await mongoose.connect(this.mongoUrl, {
         useNewUrlParser: true,
-        useUnifiedTopology: true,
+        useUnifiedTopology: true
       });
       console.log('Connected to MongoDB');
     } catch (error) {
@@ -86,7 +88,9 @@ class MinecraftVoteBot {
 
   async fetchVoteCount() {
     try {
-      const response = await axios.get(`https://minecraft-mp.com/api/?object=servers&element=voters&key=${this.serverKey}&month=${this.period}&format=${this.format}`);
+      const response = await axios.get(
+        `https://minecraft-mp.com/api/?object=servers&element=voters&key=${this.serverKey}&month=${this.period}&format=${this.format}`
+      );
       return response.data;
     } catch (error) {
       console.error('Error fetching vote count:', error.message);
@@ -96,7 +100,9 @@ class MinecraftVoteBot {
 
   async fetchVoteTimestamps() {
     try {
-      const response = await axios.get(`https://minecraft-mp.com/api/?object=servers&element=votes&key=${this.serverKey}&format=${this.format}`);
+      const response = await axios.get(
+        `https://minecraft-mp.com/api/?object=servers&element=votes&key=${this.serverKey}&format=${this.format}`
+      );
       return response.data;
     } catch (error) {
       console.error('Error fetching vote timestamps:', error.message);
@@ -106,22 +112,68 @@ class MinecraftVoteBot {
 
   convertESTtoIST(estDateString) {
     if (!estDateString || estDateString === 'Unknown') return 'Unknown';
-    let dateStr = estDateString.replace(' EST', '').trim().replace(/(\d+)(st|nd|rd|th)/, '$1');
-    const estDate = new Date(dateStr);
+
+    let dateStr = estDateString
+      .replace(' EST', '')
+      .trim()
+      .replace(/(\d+)(st|nd|rd|th)/, '$1');
+
+    const estDate = new Date(Date.parse(dateStr + ' GMT-0500'));
+
     if (isNaN(estDate.getTime())) return 'Invalid Date';
+
     const istDate = new Date(estDate.getTime() + (10.5 * 60 * 60 * 1000));
-    return istDate.toLocaleString('en-IN', { timeZone: 'Asia/Kolkata' }) + ' IST';
+
+    return istDate.toLocaleString('en-IN', {
+      timeZone: 'Asia/Kolkata',
+      hour12: false
+    }) + ' IST';
   }
 
   getLatestTimestampForUser(timestamps, nickname) {
-    const userVotes = timestamps.votes.filter(v => v.nickname === nickname);
-    if (!userVotes.length) return null;
+    const userVotes = timestamps.votes.filter(vote => vote.nickname === nickname);
+    if (userVotes.length === 0) return null;
+
     userVotes.sort((a, b) => b.timestamp - a.timestamp);
     return userVotes[0];
   }
 
-  generateDataHash(voters) {
-    const dataString = JSON.stringify(voters);
+  async createVoteEmbed(voteData, timestampData) {
+    if (!voteData || !voteData.voters || !timestampData) return null;
+
+    const sortedVoters = voteData.voters.sort((a, b) => parseInt(b.votes) - parseInt(a.votes));
+
+    const embed = new EmbedBuilder()
+      .setTitle(voteData.name || 'Minecraft Server')
+      .setColor(0x00AE86)
+      .setTimestamp()
+      .setFooter({ text: 'Vote Tracker Bot' });
+
+    let description = '';
+
+    if (sortedVoters.length === 0) {
+      description = 'No votes this month yet!';
+    } else {
+      sortedVoters.forEach((voter, index) => {
+        const latestVote = this.getLatestTimestampForUser(timestampData, voter.nickname);
+        const lastVoteDate = latestVote ? this.convertESTtoIST(latestVote.date) : 'Unknown';
+
+        description += `**${index + 1}.** ${voter.nickname}\n`;
+        description += `**Votes:** ${voter.votes}\n`;
+        description += `**Last Vote:** ${lastVoteDate}\n\n`;
+      });
+    }
+
+    embed.setDescription(description);
+    return embed;
+  }
+
+  generateDataHash(voteData, timestampData) {
+    const dataString = JSON.stringify({
+      voters: voteData?.voters || [],
+      timestamps: timestampData?.votes || []
+    });
+
     let hash = 0;
     for (let i = 0; i < dataString.length; i++) {
       const char = dataString.charCodeAt(i);
@@ -131,121 +183,115 @@ class MinecraftVoteBot {
     return hash.toString();
   }
 
-  async createVoteEmbed(voters) {
-    const embed = new EmbedBuilder()
-      .setTitle('🗳️ Minecraft Vote Leaderboard')
-      .setColor(0x00AE86)
-      .setTimestamp()
-      .setFooter({ text: 'Vote Tracker Bot' });
-
-    let desc = '';
-
-    if (voters.length === 0) {
-      desc = 'No votes this month yet!';
-    } else {
-      voters.forEach((voter, i) => {
-        desc += `**${i + 1}.** ${voter.nickname}\n`;
-        desc += `**Votes:** ${voter.votes} — **Last Vote:** ${voter.lastVote}\n\n`;
-      });
-    }
-
-    embed.setDescription(desc);
-    return embed;
-  }
-
   async updateVoteMessage() {
     try {
+      const channel = await this.client.channels.fetch(this.channelId);
+      if (!channel) {
+        console.error('Channel not found');
+        return;
+      }
+
       const [voteData, timestampData] = await Promise.all([
         this.fetchVoteCount(),
         this.fetchVoteTimestamps()
       ]);
 
-      if (!voteData || !voteData.voters || !timestampData) {
-        console.log('API data missing.');
+      if (!voteData || !timestampData) {
+        console.log('Failed to fetch data from API');
         return;
       }
 
-      const voters = voteData.voters.map(v => {
-        const lastVoteObj = this.getLatestTimestampForUser(timestampData, v.nickname);
-        return {
-          nickname: v.nickname,
-          votes: parseInt(v.votes),
-          lastVote: lastVoteObj ? this.convertESTtoIST(lastVoteObj.date) : 'Unknown'
-        };
-      });
-
-      const newHash = this.generateDataHash(voters);
-      let stored = await VoteData.findOne({ serverId: this.serverKey });
-
-      const channel = await this.client.channels.fetch(this.channelId);
-      if (!channel) {
-        console.log('Channel not found');
-        return;
+      const newHash = this.generateDataHash(voteData, timestampData);
+      let storedData = await VoteData.findOne({ serverId: this.serverKey });
+      if (!storedData) {
+        storedData = new VoteData({ serverId: this.serverKey });
       }
 
-      let messageExists = true;
-      if (!stored) {
-        stored = new VoteData({ serverId: this.serverKey });
-        messageExists = false;
-      }
-
-      if (stored.lastUpdateHash === newHash && messageExists) {
+      if (storedData.lastUpdateHash === newHash) {
         try {
-          await channel.messages.fetch(stored.lastMessageId);
-          console.log('No changes detected');
-          return;
+          if (storedData.lastMessageId) {
+            await channel.messages.fetch(storedData.lastMessageId);
+            console.log('No changes detected, message still exists');
+          } else {
+            console.log('No changes detected, but no message found');
+          }
         } catch {
-          console.log('Previous message deleted. Reposting.');
+          console.log('Message was deleted. Reposting...');
+          const embed = await this.createVoteEmbed(voteData, timestampData);
+          const newMessage = await channel.send({ embeds: [embed] });
+          storedData.lastMessageId = newMessage.id;
+          storedData.lastUpdateHash = newHash;
+          storedData.updatedAt = new Date();
+          await storedData.save();
         }
+        return;
       }
 
-      const embed = await this.createVoteEmbed(voters);
-      let msg;
+      const embed = await this.createVoteEmbed(voteData, timestampData);
+      if (!embed) {
+        console.log('Failed to create embed');
+        return;
+      }
 
-      if (stored.lastMessageId) {
+      let message;
+      if (storedData.lastMessageId) {
         try {
-          msg = await channel.messages.fetch(stored.lastMessageId);
-          await msg.edit({ embeds: [embed] });
+          message = await channel.messages.fetch(storedData.lastMessageId);
+          await message.edit({ embeds: [embed] });
+          console.log('Updated existing message');
         } catch {
-          msg = await channel.send({ embeds: [embed] });
-          stored.lastMessageId = msg.id;
+          message = await channel.send({ embeds: [embed] });
+          storedData.lastMessageId = message.id;
+          console.log('Previous message not found, sent new message');
         }
       } else {
-        msg = await channel.send({ embeds: [embed] });
-        stored.lastMessageId = msg.id;
+        message = await channel.send({ embeds: [embed] });
+        storedData.lastMessageId = message.id;
+        console.log('Sent first vote message');
       }
 
-      stored.voters = voters;
-      stored.lastUpdateHash = newHash;
-      stored.updatedAt = new Date();
-      await stored.save();
+      storedData.lastUpdateHash = newHash;
+      storedData.updatedAt = new Date();
+      await storedData.save();
 
-      console.log('Vote message updated.');
-    } catch (err) {
-      console.error('Update error:', err.message);
+      console.log('Vote message updated successfully');
+    } catch (error) {
+      console.error('Error updating vote message:', error);
     }
   }
 
   startVoteMonitoring() {
-    console.log('Started vote monitoring...');
-    setInterval(() => this.updateVoteMessage(), 10 * 60 * 1000);
+    console.log('Starting vote monitoring...');
+    this.updateVoteMessage();
+    setInterval(() => {
+      this.updateVoteMessage();
+    }, 10 * 60 * 1000); // 10 minutes
   }
 
   async start() {
-    await this.connectToDatabase();
-    await this.client.login(this.discordToken);
+    try {
+      await this.connectToDatabase();
+      await this.client.login(this.discordToken);
+    } catch (error) {
+      console.error('Error starting bot:', error);
+      process.exit(1);
+    }
   }
 }
 
 // Graceful shutdown
-['SIGINT', 'SIGTERM'].forEach(signal => {
-  process.on(signal, async () => {
-    console.log(`Shutting down (${signal})...`);
-    await mongoose.connection.close();
-    process.exit(0);
-  });
+process.on('SIGINT', async () => {
+  console.log('Shutting down bot...');
+  await mongoose.connection.close();
+  process.exit(0);
 });
 
-// Launch the bot
+process.on('SIGTERM', async () => {
+  console.log('Shutting down bot...');
+  await mongoose.connection.close();
+  process.exit(0);
+});
+
+// Start the bot
 const bot = new MinecraftVoteBot();
 bot.start();
