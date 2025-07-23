@@ -113,21 +113,34 @@ class MinecraftVoteBot {
   convertESTtoIST(estDateString) {
     if (!estDateString || estDateString === 'Unknown') return 'Unknown';
 
-    let dateStr = estDateString
-      .replace(' EST', '')
-      .trim()
-      .replace(/(\d+)(st|nd|rd|th)/, '$1');
+    try {
+      let dateStr = estDateString
+        .replace(' EST', '')
+        .trim()
+        .replace(/(\d+)(st|nd|rd|th)/, '$1');
 
-    const estDate = new Date(Date.parse(dateStr + ' GMT-0500'));
+      const estDate = new Date(dateStr + ' GMT-0500');
+      if (isNaN(estDate.getTime())) return 'Invalid Date';
 
-    if (isNaN(estDate.getTime())) return 'Invalid Date';
+      const istDate = new Date(estDate.getTime() + (10.5 * 60 * 60 * 1000));
 
-    const istDate = new Date(estDate.getTime() + (10.5 * 60 * 60 * 1000));
+      const day = istDate.getDate().toString().padStart(2, '0');
+      const month = (istDate.getMonth() + 1).toString().padStart(2, '0');
+      const year = istDate.getFullYear();
 
-    return istDate.toLocaleString('en-IN', {
-      timeZone: 'Asia/Kolkata',
-      hour12: false
-    }) + ' IST';
+      let hours = istDate.getHours();
+      const minutes = istDate.getMinutes().toString().padStart(2, '0');
+      const seconds = istDate.getSeconds().toString().padStart(2, '0');
+
+      const ampm = hours >= 12 ? 'PM' : 'AM';
+      hours = hours % 12;
+      hours = hours === 0 ? 12 : hours;
+
+      return `${day}/${month}/${year}, ${hours}:${minutes}:${seconds} ${ampm} IST`;
+    } catch (err) {
+      console.error('Date parse error:', err);
+      return 'Invalid Date';
+    }
   }
 
   getLatestTimestampForUser(timestamps, nickname) {
@@ -265,7 +278,7 @@ class MinecraftVoteBot {
     this.updateVoteMessage();
     setInterval(() => {
       this.updateVoteMessage();
-    }, 10 * 60 * 1000); // 10 minutes
+    }, 10 * 60 * 1000); // Every 10 minutes
   }
 
   async start() {
