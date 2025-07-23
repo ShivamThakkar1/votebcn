@@ -1,6 +1,7 @@
 const { Client, GatewayIntentBits, EmbedBuilder } = require('discord.js');
 const mongoose = require('mongoose');
 const axios = require('axios');
+const express = require('express');
 require('dotenv').config();
 
 // MongoDB Schema
@@ -29,8 +30,10 @@ class MinecraftVoteBot {
     this.discordToken = process.env.DISCORD_TOKEN;
     this.period = process.env.PERIOD || this.getCurrentPeriod();
     this.format = process.env.FORMAT || 'json';
+    this.port = process.env.PORT || 3000;
     
     this.setupEventHandlers();
+    this.setupWebServer();
   }
 
   getCurrentPeriod() {
@@ -38,6 +41,30 @@ class MinecraftVoteBot {
     const year = now.getFullYear();
     const month = String(now.getMonth() + 1).padStart(2, '0');
     return `${year}${month}`;
+  }
+
+  setupWebServer() {
+    const app = express();
+    
+    app.get('/', (req, res) => {
+      res.json({ 
+        status: 'Bot is running',
+        timestamp: new Date().toISOString(),
+        uptime: process.uptime()
+      });
+    });
+
+    app.get('/health', (req, res) => {
+      res.json({ 
+        status: 'healthy',
+        bot: this.client.isReady() ? 'connected' : 'disconnected',
+        mongodb: mongoose.connection.readyState === 1 ? 'connected' : 'disconnected'
+      });
+    });
+
+    app.listen(this.port, () => {
+      console.log(`Web server running on port ${this.port}`);
+    });
   }
 
   setupEventHandlers() {
@@ -84,27 +111,45 @@ class MinecraftVoteBot {
 
   convertESTtoIST(estDateString) {
     try {
-      // Parse the EST date string
-      const estDate = new Date(estDateString.replace(' EST', ' GMT-0500'));
+      // Handle the specific format: "July 23rd, 2025 02:27 AM EST"
+      if (!estDateString || estDateString === 'Unknown') {
+        return 'Unknown';
+      }
+
+      // Remove EST and parse the date
+      let dateStr = estDateString.replace(' EST', '').trim();
       
-      // Convert to IST (UTC+5:30)
-      const istDate = new Date(estDate.getTime() + (10.5 * 60 * 60 * 1000)); // EST to IST is +10.5 hours
+      // Handle ordinal suffixes (1st, 2nd, 3rd, 4th, etc.)
+      dateStr = dateStr.replace(/(\d+)(st|nd|rd|th)/, '$1');
       
-      // Format as readable string
+      // Parse the cleaned date string
+      const estDate = new Date(dateStr);
+      
+      // Check if the date is valid
+      if (isNaN(estDate.getTime())) {
+        console.log(`Invalid date format: ${estDateString}`);
+        return 'Invalid Date';
+      }
+      
+      // EST is UTC-5, so add 5 hours to get UTC, then add 5.5 hours to get IST
+      // Total: add 10.5 hours to convert EST to IST
+      const istDate = new Date(estDate.getTime() + (10.5 * 60 * 60 * 1000));
+      
+      // Format as readable IST string
       const options = {
         year: 'numeric',
         month: 'long',
         day: 'numeric',
         hour: '2-digit',
         minute: '2-digit',
-        timeZone: 'Asia/Kolkata',
-        timeZoneName: 'short'
+        hour12: true,
+        timeZone: 'Asia/Kolkata'
       };
       
-      return istDate.toLocaleDateString('en-US', options);
+      return istDate.toLocaleDateString('en-IN', options) + ' IST';
     } catch (error) {
-      console.error('Error converting EST to IST:', error);
-      return estDateString; // Return original if conversion fails
+      console.error('Error converting EST to IST:', error, 'Input:', estDateString);
+      return 'Date Error';
     }
   }
 
